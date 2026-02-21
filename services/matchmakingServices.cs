@@ -5,41 +5,74 @@ namespace MultiplayerMatchmaking.Services;
 
 public class MatchmakingService
 {
-    private readonly ConcurrentQueue<PlayerQueueEntry> _queue = new();
+    // region -> queue
+    private readonly ConcurrentDictionary<string, ConcurrentQueue<PartyQueueEntry>> _queuesByRegion
+        = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly ConcurrentDictionary<string, Match> _matches = new();
     private readonly ConcurrentDictionary<string, string> _playerToMatch = new();
 
-    public int QueueSize => _queue.Count;
+    private ConcurrentQueue<PartyQueueEntry> GetQueue(string region)
+        => _queuesByRegion.GetOrAdd(region, _ => new ConcurrentQueue<PartyQueueEntry>());
 
-    public bool JoinQueue(string playerId)
+    public int QueueSize => _queuesByRegion.Values.Sum(q => q.Count);
+
+    public bool JoinParty(List<string> playerIds, string region)
     {
-        if (string.IsNullOrWhiteSpace(playerId)) return false;
-        if (_playerToMatch.ContainsKey(playerId)) return false;
-        if (_queue.Any(e => e.PlayerId == playerId)) return false;
+        if (playerIds == null || playerIds.Count == 0) return false;
+        if (playerIds.Count > 2) return false; // limit party size 2
+        if (string.IsNullOrWhiteSpace(region)) return false;
 
-        _queue.Enqueue(new PlayerQueueEntry { PlayerId = playerId });
+        region = region.Trim();
+
+        // Check none already matched
+        foreach (var pid in playerIds)
+        {
+            if (_playerToMatch.ContainsKey(pid))
+                return false;
+        }
+
+        var q = GetQueue(region);
+
+        q.Enqueue(new PartyQueueEntry
+        {
+            PlayerIds = playerIds,
+            Region = region
+        });
+
         return true;
     }
 
     public bool LeaveQueue(string playerId)
     {
-        if (string.IsNullOrWhiteSpace(playerId)) return false;
+        if (string.IsNullOrWhiteSpace(playerId))
+            return false;
 
-        var kept = new List<PlayerQueueEntry>();
-        bool removed = false;
+        bool removedAny = false;
 
-        while (_queue.TryDequeue(out var entry))
+        foreach (var kv in _queuesByRegion)
         {
-            if (!removed && entry.PlayerId == playerId)
+            var q = kv.Value;
+
+            var kept = new List<PartyQueueEntry>();
+
+            while (q.TryDequeue(out var party))
             {
-                removed = true;
-                continue;
+                // If this party contains the player → remove whole party
+                if (party.PlayerIds.Contains(playerId))
+                {
+                    removedAny = true;
+                    continue;
+                }
+
+                kept.Add(party);
             }
-            kept.Add(entry);
+
+            foreach (var p in kept)
+                q.Enqueue(p);
         }
 
-        foreach (var e in kept) _queue.Enqueue(e);
-        return removed;
+        return removedAny;
     }
 
     public Match? GetMatchForPlayer(string playerId)
@@ -51,39 +84,59 @@ public class MatchmakingService
         return null;
     }
 
-    // Called by the background worker
+    // Called by background worker
     public Match? TryCreateMatch()
     {
-        if (_queue.Count < 2) return null;
-
-        if (!_queue.TryDequeue(out var p1)) return null;
-        if (!_queue.TryDequeue(out var p2))
+        foreach (var kv in _queuesByRegion)
         {
-            _queue.Enqueue(p1);
-            return null;
+            var region = kv.Key;
+            var q = kv.Value;
+
+            if (q.Count == 0) continue;
+
+            var parties = new List<PartyQueueEntry>();
+            int totalPlayers = 0;
+
+            var tempList = new List<PartyQueueEntry>();
+
+            while (q.TryDequeue(out var party))
+            {
+                tempList.Add(party);
+
+                if (totalPlayers + party.Size <= 4)
+                {
+                    parties.Add(party);
+                    totalPlayers += party.Size;
+                }
+
+                if (totalPlayers == 4)
+                    break;
+            }
+
+            if (totalPlayers == 4)
+            {
+                var players = parties.SelectMany(p => p.PlayerIds).ToList();
+
+                var match = new Match
+                {
+                    MatchId = Guid.NewGuid().ToString("N"),
+                    Players = players,
+                    Region = region
+                };
+
+                _matches[match.MatchId] = match;
+
+                foreach (var p in players)
+                    _playerToMatch[p] = match.MatchId;
+
+                return match;
+            }
+
+            // Not enough players → requeue all
+            foreach (var p in tempList)
+                q.Enqueue(p);
         }
 
-        if (_playerToMatch.ContainsKey(p1.PlayerId))
-        {
-            _queue.Enqueue(p2);
-            return null;
-        }
-        if (_playerToMatch.ContainsKey(p2.PlayerId))
-        {
-            _queue.Enqueue(p1);
-            return null;
-        }
-
-        var match = new Match
-        {
-            MatchId = Guid.NewGuid().ToString("N"),
-            Players = new List<string> { p1.PlayerId, p2.PlayerId }
-        };
-
-        _matches[match.MatchId] = match;
-        _playerToMatch[p1.PlayerId] = match.MatchId;
-        _playerToMatch[p2.PlayerId] = match.MatchId;
-
-        return match;
+        return null;
     }
 }

@@ -1,8 +1,10 @@
 namespace MultiplayerMatchmaking.Models;
 
-public class PlayerQueueEntry
+public class PartyQueueEntry
 {
-    public required string PlayerId { get; init; }
+    public required List<string> PlayerIds { get; init; }
     public required string Region { get; init; }
     public DateTime JoinedAtUtc { get; init; } = DateTime.UtcNow;
+
+    public int Size => PlayerIds.Count;
 }
