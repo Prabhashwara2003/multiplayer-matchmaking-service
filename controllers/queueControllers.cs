@@ -10,7 +10,7 @@ public class QueueController : ControllerBase
     private readonly MatchmakingService _mm;
     public QueueController(MatchmakingService mm) => _mm = mm;
 
-    public record JoinRequest(List<string> PlayerIds, string Region);
+    public record JoinRequest(Dictionary<string, int> Players, string Region);
     public record LeaveRequest(string PlayerId);
 
     [HttpPost("join")]

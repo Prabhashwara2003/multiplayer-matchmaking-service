@@ -18,4 +18,13 @@ public class MatchController : ControllerBase
             ? Ok(match)
             : NotFound(new { status = "no_match_yet" });
     }
+    [HttpPost("{matchId}/accept/{playerId}")]
+    public IActionResult Accept(string matchId, string playerId)
+    {
+        var success = _mm.AcceptMatch(playerId);
+
+        return success
+            ? Ok(new { status = "accepted" })
+            : BadRequest(new { status = "failed" });
+    }
 }

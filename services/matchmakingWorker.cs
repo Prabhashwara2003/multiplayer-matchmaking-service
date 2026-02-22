@@ -18,13 +18,19 @@ public class MatchmakingWorker : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var match = _mm.TryCreateMatch();
+
             if (match != null)
             {
-                _logger.LogInformation("Match created {MatchId} with players {P1}, {P2}",
-                    match.MatchId, match.Players[0], match.Players[1]);
+                _logger.LogInformation(
+                    "Match created {MatchId} with players {Players}",
+                    match.MatchId,
+                    string.Join(",", match.Players));
             }
+
+            _mm.CleanupExpiredMatches();
 
             await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
         }
     }
+    
 }

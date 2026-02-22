@@ -17,27 +17,22 @@ public class MatchmakingService
 
     public int QueueSize => _queuesByRegion.Values.Sum(q => q.Count);
 
-    public bool JoinParty(List<string> playerIds, string region)
+    public bool JoinParty(Dictionary<string, int> players, string region)
     {
-        if (playerIds == null || playerIds.Count == 0) return false;
-        if (playerIds.Count > 2) return false; // limit party size 2
+        if (players == null || players.Count == 0) return false;
+        if (players.Count > 2) return false;
         if (string.IsNullOrWhiteSpace(region)) return false;
 
-        region = region.Trim();
-
-        // Check none already matched
-        foreach (var pid in playerIds)
-        {
-            if (_playerToMatch.ContainsKey(pid))
+        foreach (var p in players.Keys)
+            if (_playerToMatch.ContainsKey(p))
                 return false;
-        }
 
-        var q = GetQueue(region);
+        var q = GetQueue(region.Trim());
 
         q.Enqueue(new PartyQueueEntry
         {
-            PlayerIds = playerIds,
-            Region = region
+            PlayerMmrs = players,
+            Region = region.Trim()
         });
 
         return true;
@@ -115,13 +110,16 @@ public class MatchmakingService
 
             if (totalPlayers == 4)
             {
+                var originalParties = parties.Select(p => p.PlayerIds).ToList();
+
                 var players = parties.SelectMany(p => p.PlayerIds).ToList();
 
                 var match = new Match
                 {
                     MatchId = Guid.NewGuid().ToString("N"),
                     Players = players,
-                    Region = region
+                    Region = region,
+                    OriginalParties = originalParties
                 };
 
                 _matches[match.MatchId] = match;
@@ -138,5 +136,53 @@ public class MatchmakingService
         }
 
         return null;
+    }
+    public bool AcceptMatch(string playerId)
+    {
+        if (!_playerToMatch.TryGetValue(playerId, out var matchId))
+            return false;
+
+        if (!_matches.TryGetValue(matchId, out var match))
+            return false;
+
+        if (match.Status != "Pending")
+            return false;
+
+        match.AcceptedPlayers.Add(playerId);
+
+        if (match.AcceptedPlayers.Count == match.Players.Count)
+        {
+            match.Status = "Confirmed";
+        }
+
+        return true;
+    }
+    public void CleanupExpiredMatches()
+    {
+        var now = DateTime.UtcNow;
+
+        foreach (var match in _matches.Values)
+        {
+            if (match.Status == "Pending" && match.ExpiresAtUtc < now)
+            {
+                match.Status = "Cancelled";
+
+                // Remove player-to-match mapping
+                foreach (var player in match.Players)
+                    _playerToMatch.TryRemove(player, out _);
+
+                // Requeue original parties
+                var q = GetQueue(match.Region);
+
+                foreach (var party in match.OriginalParties)
+                {
+                    q.Enqueue(new PartyQueueEntry
+                    {
+                        PlayerIds = party,
+                        Region = match.Region
+                    });
+                }
+            }
+        }
     }
 }
