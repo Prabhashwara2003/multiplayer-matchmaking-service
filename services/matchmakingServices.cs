@@ -17,22 +17,28 @@ public class MatchmakingService
 
     public int QueueSize => _queuesByRegion.Values.Sum(q => q.Count);
 
-    public bool JoinParty(Dictionary<string, int> players, string region)
+    public bool JoinParty(List<string> playerIds, string region,Dictionary<string, int> PlayerMmrs)
     {
-        if (players == null || players.Count == 0) return false;
-        if (players.Count > 2) return false;
+        if (playerIds == null || playerIds.Count == 0) return false;
+        if (playerIds.Count > 2) return false; // limit party size 2
         if (string.IsNullOrWhiteSpace(region)) return false;
 
-        foreach (var p in players.Keys)
-            if (_playerToMatch.ContainsKey(p))
-                return false;
+        region = region.Trim();
 
-        var q = GetQueue(region.Trim());
+        // Check none already matched
+        foreach (var pid in playerIds)
+        {
+            if (_playerToMatch.ContainsKey(pid))
+                return false;
+        }
+
+        var q = GetQueue(region);
 
         q.Enqueue(new PartyQueueEntry
         {
-            PlayerMmrs = players,
-            Region = region.Trim()
+            PlayerIds = playerIds,
+            Region = region,
+            PlayerMmrs = PlayerMmrs
         });
 
         return true;
@@ -80,19 +86,19 @@ public class MatchmakingService
     }
 
     // Called by background worker
-    public Match? TryCreateMatch()
+   public Match? TryCreateMatch()
     {
         foreach (var kv in _queuesByRegion)
         {
             var region = kv.Key;
             var q = kv.Value;
 
-            if (q.Count == 0) continue;
+            if (q.Count == 0)
+                continue;
 
             var parties = new List<PartyQueueEntry>();
-            int totalPlayers = 0;
-
             var tempList = new List<PartyQueueEntry>();
+            int totalPlayers = 0;
 
             while (q.TryDequeue(out var party))
             {
@@ -110,27 +116,46 @@ public class MatchmakingService
 
             if (totalPlayers == 4)
             {
-                var originalParties = parties.Select(p => p.PlayerIds).ToList();
+                // 🔹 Collect all player MMRs
+                var allMmrs = parties
+                    .SelectMany(p => p.PlayerMmrs.Values)
+                    .ToList();
 
-                var players = parties.SelectMany(p => p.PlayerIds).ToList();
+                int maxMmr = allMmrs.Max();
+                int minMmr = allMmrs.Min();
+                int diff = maxMmr - minMmr;
 
-                var match = new Match
+                // 🔹 Get strictest tolerance
+                int allowedTolerance = parties
+                    .Select(p => p.GetDynamicTolerance())
+                    .Min();
+
+                if (diff <= allowedTolerance)
                 {
-                    MatchId = Guid.NewGuid().ToString("N"),
-                    Players = players,
-                    Region = region,
-                    OriginalParties = originalParties
-                };
+                    var originalParties = parties.ToList();
 
-                _matches[match.MatchId] = match;
+                    var players = parties
+                        .SelectMany(p => p.PlayerIds)
+                        .ToList();
 
-                foreach (var p in players)
-                    _playerToMatch[p] = match.MatchId;
+                    var match = new Match
+                    {
+                        MatchId = Guid.NewGuid().ToString("N"),
+                        Players = players,
+                        Region = region,
+                        OriginalParties = originalParties
+                    };
 
-                return match;
+                    _matches[match.MatchId] = match;
+
+                    foreach (var p in players)
+                        _playerToMatch[p] = match.MatchId;
+
+                    return match;
+                }
             }
 
-            // Not enough players → requeue all
+            // 🔹 If not enough players OR MMR diff too high → requeue everything
             foreach (var p in tempList)
                 q.Enqueue(p);
         }
@@ -167,20 +192,14 @@ public class MatchmakingService
             {
                 match.Status = "Cancelled";
 
-                // Remove player-to-match mapping
                 foreach (var player in match.Players)
                     _playerToMatch.TryRemove(player, out _);
 
-                // Requeue original parties
                 var q = GetQueue(match.Region);
 
                 foreach (var party in match.OriginalParties)
                 {
-                    q.Enqueue(new PartyQueueEntry
-                    {
-                        PlayerIds = party,
-                        Region = match.Region
-                    });
+                    q.Enqueue(party);
                 }
             }
         }

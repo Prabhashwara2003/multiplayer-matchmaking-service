@@ -10,13 +10,13 @@ public class QueueController : ControllerBase
     private readonly MatchmakingService _mm;
     public QueueController(MatchmakingService mm) => _mm = mm;
 
-    public record JoinRequest(Dictionary<string, int> Players, string Region);
+    public record JoinRequest(List<string> PlayerIds, string Region,Dictionary<string, int> PlayerMmrs);
     public record LeaveRequest(string PlayerId);
 
     [HttpPost("join")]
     public IActionResult Join([FromBody] JoinRequest req)
     {
-        var ok = _mm.JoinParty(req.PlayerIds, req.Region);
+        var ok = _mm.JoinParty(req.PlayerIds, req.Region, req.PlayerMmrs);
         return ok
             ? Ok(new { status = "queued", queueSize = _mm.QueueSize })
             : BadRequest(new { status = "failed", reason = "already queued or matched (or invalid id)" });

@@ -9,6 +9,6 @@ public class Match
     public HashSet<string> AcceptedPlayers { get; init; } = new();
     public string Status { get; set; } = "Pending"; // Pending | Confirmed | Cancelled
     public DateTime ExpiresAtUtc { get; set; } = DateTime.UtcNow.AddSeconds(120);
-    public required List<List<string>> OriginalParties { get; init; }
+    public required List<PartyQueueEntry> OriginalParties { get; init; }
 
 }
