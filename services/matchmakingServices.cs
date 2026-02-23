@@ -15,21 +15,38 @@ public class MatchmakingService
     private ConcurrentQueue<PartyQueueEntry> GetQueue(string region)
         => _queuesByRegion.GetOrAdd(region, _ => new ConcurrentQueue<PartyQueueEntry>());
 
+    private readonly ConcurrentDictionary<string, PlayerProfile> _players = new();
+
+    private const int KFactor = 32;
+
     public int QueueSize => _queuesByRegion.Values.Sum(q => q.Count);
 
-    public bool JoinParty(List<string> playerIds, string region,Dictionary<string, int> PlayerMmrs)
+    public bool JoinParty(List<string> playerIds, string region, Dictionary<string, int> playerMmrs)
     {
         if (playerIds == null || playerIds.Count == 0) return false;
         if (playerIds.Count > 2) return false; // limit party size 2
         if (string.IsNullOrWhiteSpace(region)) return false;
+        if (playerMmrs == null) return false;
 
         region = region.Trim();
 
+        // Ensure MMR provided for each playerId (avoids KeyNotFound)
+        foreach (var pid in playerIds)
+            if (!playerMmrs.ContainsKey(pid))
+                return false;
+
         // Check none already matched
         foreach (var pid in playerIds)
-        {
             if (_playerToMatch.ContainsKey(pid))
                 return false;
+
+        // Resolve MMRs from SERVER store (client MMR only used on first creation)
+        var resolvedMmrs = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var pid in playerIds)
+        {
+            var profile = GetOrCreatePlayer(pid, playerMmrs[pid]); // only uses given MMR if player is new
+            resolvedMmrs[pid] = profile.Mmr;                      // authoritative MMR
         }
 
         var q = GetQueue(region);
@@ -38,7 +55,7 @@ public class MatchmakingService
         {
             PlayerIds = playerIds,
             Region = region,
-            PlayerMmrs = PlayerMmrs
+            PlayerMmrs = resolvedMmrs
         });
 
         return true;
@@ -203,5 +220,71 @@ public class MatchmakingService
                 }
             }
         }
+    }
+
+    public PlayerProfile GetOrCreatePlayer(string playerId, int initialMmr = 1500)
+    {
+        return _players.GetOrAdd(playerId, id => new PlayerProfile
+        {
+            PlayerId = id,
+            Mmr = initialMmr,
+            MatchesPlayed = 0
+        });
+    }
+    public PlayerProfile? TryGetPlayer(string playerId)
+    {
+        return _players.TryGetValue(playerId, out var p) ? p : null;
+    }
+    private double ExpectedScore(int ratingA, int ratingB)
+    {
+        return 1.0 / (1.0 + Math.Pow(10, (ratingB - ratingA) / 400.0));
+    }
+
+    public bool ReportMatchResult(string matchId, int winningTeam)
+    {
+        if (!_matches.TryGetValue(matchId, out var match))
+            return false;
+
+        if (match.Status != "Confirmed")
+            return false;
+
+        if (winningTeam != 1 && winningTeam != 2)
+            return false;
+
+        if (match.Players.Count != 4)
+            return false;
+
+        var team1 = match.Players.Take(2).ToList();
+        var team2 = match.Players.Skip(2).Take(2).ToList();
+
+        var team1Avg = team1.Select(p => _players[p].Mmr).Average();
+        var team2Avg = team2.Select(p => _players[p].Mmr).Average();
+
+        var expected1 = ExpectedScore((int)team1Avg, (int)team2Avg);
+        var expected2 = ExpectedScore((int)team2Avg, (int)team1Avg);
+
+        double score1 = winningTeam == 1 ? 1 : 0;
+        double score2 = winningTeam == 2 ? 1 : 0;
+
+        foreach (var p in team1)
+        {
+            var profile = _players[p];
+            profile.Mmr += (int)(KFactor * (score1 - expected1));
+            profile.MatchesPlayed++;
+        }
+
+        foreach (var p in team2)
+        {
+            var profile = _players[p];
+            profile.Mmr += (int)(KFactor * (score2 - expected2));
+            profile.MatchesPlayed++;
+        }
+
+        match.Status = "Completed";
+
+        foreach (var p in match.Players)
+            _playerToMatch.TryRemove(p, out _);
+
+        return true;
     }
 }
