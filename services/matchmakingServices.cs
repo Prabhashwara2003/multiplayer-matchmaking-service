@@ -1,10 +1,17 @@
 using System.Collections.Concurrent;
 using MultiplayerMatchmaking.Models;
+using Microsoft.EntityFrameworkCore;
+using MultiplayerMatchmaking.Data;
 
 namespace MultiplayerMatchmaking.Services;
 
 public class MatchmakingService
 {
+    private readonly IDbContextFactory<AppDbContext> _dbFactory;
+
+    public MatchmakingService(IDbContextFactory<AppDbContext> dbFactory)
+        => _dbFactory = dbFactory;
+
     // region -> queue
     private readonly ConcurrentDictionary<string, ConcurrentQueue<PartyQueueEntry>> _queuesByRegion
         = new(StringComparer.OrdinalIgnoreCase);
@@ -15,7 +22,7 @@ public class MatchmakingService
     private ConcurrentQueue<PartyQueueEntry> GetQueue(string region)
         => _queuesByRegion.GetOrAdd(region, _ => new ConcurrentQueue<PartyQueueEntry>());
 
-    private readonly ConcurrentDictionary<string, PlayerProfile> _players = new();
+    //private readonly ConcurrentDictionary<string, PlayerProfile> _players = new();
 
     private const int KFactor = 32;
 
@@ -224,16 +231,20 @@ public class MatchmakingService
 
     public PlayerProfile GetOrCreatePlayer(string playerId, int initialMmr = 1500)
     {
-        return _players.GetOrAdd(playerId, id => new PlayerProfile
-        {
-            PlayerId = id,
-            Mmr = initialMmr,
-            MatchesPlayed = 0
-        });
+        using var db = _dbFactory.CreateDbContext();
+
+        var p = db.Players.Find(playerId);
+        if (p != null) return p;
+
+        p = new PlayerProfile { PlayerId = playerId, Mmr = initialMmr, MatchesPlayed = 0 };
+        db.Players.Add(p);
+        db.SaveChanges();
+        return p;
     }
     public PlayerProfile? TryGetPlayer(string playerId)
     {
-        return _players.TryGetValue(playerId, out var p) ? p : null;
+        using var db = _dbFactory.CreateDbContext();
+        return db.Players.Find(playerId);
     }
     private double ExpectedScore(int ratingA, int ratingB)
     {
@@ -254,11 +265,25 @@ public class MatchmakingService
         if (match.Players.Count != 4)
             return false;
 
-        var team1 = match.Players.Take(2).ToList();
-        var team2 = match.Players.Skip(2).Take(2).ToList();
+        var team1Ids = match.Players.Take(2).ToList();
+        var team2Ids = match.Players.Skip(2).Take(2).ToList();
 
-        var team1Avg = team1.Select(p => _players[p].Mmr).Average();
-        var team2Avg = team2.Select(p => _players[p].Mmr).Average();
+        using var db = _dbFactory.CreateDbContext();
+        using var tx = db.Database.BeginTransaction();
+
+        // Load all 4 player profiles from SQLite
+        var allIds = match.Players.ToList();
+
+        var players = db.Players
+            .Where(p => allIds.Contains(p.PlayerId))
+            .ToDictionary(p => p.PlayerId, StringComparer.OrdinalIgnoreCase);
+
+        // Safety: should always be 4 (JoinParty creates players), but just in case
+        if (players.Count != 4)
+            return false;
+
+        var team1Avg = team1Ids.Select(id => players[id].Mmr).Average();
+        var team2Avg = team2Ids.Select(id => players[id].Mmr).Average();
 
         var expected1 = ExpectedScore((int)team1Avg, (int)team2Avg);
         var expected2 = ExpectedScore((int)team2Avg, (int)team1Avg);
@@ -266,19 +291,22 @@ public class MatchmakingService
         double score1 = winningTeam == 1 ? 1 : 0;
         double score2 = winningTeam == 2 ? 1 : 0;
 
-        foreach (var p in team1)
+        foreach (var id in team1Ids)
         {
-            var profile = _players[p];
+            var profile = players[id]; // EF tracked entity
             profile.Mmr += (int)(KFactor * (score1 - expected1));
             profile.MatchesPlayed++;
         }
 
-        foreach (var p in team2)
+        foreach (var id in team2Ids)
         {
-            var profile = _players[p];
+            var profile = players[id]; // EF tracked entity
             profile.Mmr += (int)(KFactor * (score2 - expected2));
             profile.MatchesPlayed++;
         }
+
+        db.SaveChanges();
+        tx.Commit();
 
         match.Status = "Completed";
 
